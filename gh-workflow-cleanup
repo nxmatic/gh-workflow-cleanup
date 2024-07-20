@@ -1,0 +1,115 @@
+#!/usr/bin/env -S bash -xe -o pipefail
+
+# Function to list workflows
+list_workflows() {
+  # Try to get the repository from the current directory
+  local repo=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)
+  
+  # If that fails, prompt the user for the repository
+  if [ -z "$repo" ]; then
+    echo "No default repository found. Please enter the repository (owner/repo):" >&2
+    read -r repo
+  fi
+
+  # Use the repository in the API call
+  gh api "repos/$repo/actions/workflows" --jq '.workflows[] | "\(.id) \(.name)"'
+}
+
+# Function to get workflow ID by name
+get_workflow_id() {
+  local workflow_name=$1
+  local repo=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)
+  if [ -z "$repo" ]; then
+    echo "No default repository found. Please enter the repository (owner/repo):" >&2
+    read -r repo
+  fi
+  gh api "repos/$repo/actions/workflows" --jq --arg name "$workflow_name" '.workflows[] | select(.name == $name) | .id'
+}
+
+# Function to list workflow runs by workflow name or ID
+list_runs() {
+  local workflow_identifier=$1
+  local repo=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)
+  if [ -z "$repo" ]; then
+    echo "No default repository found. Please enter the repository (owner/repo):" >&2
+    read -r repo
+  fi
+
+  # Check if the identifier is numeric (ID) or not (name)
+  if [[ $workflow_identifier =~ ^[0-9]+$ ]]; then
+    local workflow_id=$workflow_identifier
+  else
+    local workflow_id=$(get_workflow_id "$workflow_identifier")
+    if [ -z "$workflow_id" ]; then
+      echo "Workflow not found: $workflow_identifier" >&2
+      return 1
+    fi
+  fi
+
+  gh api "repos/$repo/actions/workflows/$workflow_id/runs" --paginate --jq '.workflow_runs[] | "\(.id) \(.status) \(.conclusion) \(.created_at)"'
+}
+
+# Function to delete a workflow run
+delete_run() {
+  local run_id=$1
+  echo "Deleting workflow run: $run_id" >&2
+  local repo=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)
+  if [ -z "$repo" ]; then
+    echo "No default repository found. Please enter the repository (owner/repo):" >&2
+    read -r repo
+  fi
+  gh api -X DELETE "repos/$repo/actions/runs/$run_id"
+}
+
+# Function to prompt the user to select a workflow
+select_workflow() {
+  echo "Available workflows:" >&2
+  workflows=$(list_workflows)
+  if [ -z "$workflows" ]; then
+    echo "No workflows found or unable to access repository." >&2
+    return 1
+  fi
+  echo "$workflows" | nl -w 2 -s '. ' >&2
+  echo >&2
+  read -p "Enter the number of the workflow you want to clean up: " workflow_number
+  selected_workflow=$(echo "$workflows" | sed -n "${workflow_number}p")
+  selected_workflow_id=$(echo "$selected_workflow" | awk '{print $1}')
+  echo "You selected: $selected_workflow_id" >&2
+  echo "$selected_workflow_id"
+}
+
+case "$1" in
+  list-workflows)
+    list_workflows
+    ;;
+  list-runs)
+    if [ -z "$2" ]; then
+      echo "Usage: $0 list-runs <workflow_name_or_id>" >&2
+      exit 1
+    fi
+    list_runs "$2"
+    ;;
+  delete-run)
+    if [ -z "$2" ]; then
+      echo "Usage: $0 delete-run <run_id>" >&2
+      exit 1
+    fi
+    delete_run "$2"
+    ;;
+  cleanup)
+    workflow_id=$(select_workflow)
+    list_runs "$workflow_id"
+    read -p "Enter the ID of the run you want to delete (or 'all' to delete all runs): " run_id
+    if [ "$run_id" = "all" ]; then
+      list_runs "$workflow_id" | awk '{print $1}' | while read -r id; do
+        delete_run "$id"
+      done
+    else
+      delete_run "$run_id"
+    fi
+    ;;
+  *)
+    echo "Usage: $0 {list-workflows|list-runs|delete-run|cleanup} <workflow_name_or_id|run_id>" >&2
+    exit 1
+    ;;
+esac
